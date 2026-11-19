@@ -86,8 +86,10 @@ Remaining:
   release during a pending read.
 - Run a sanitizer build, and repeat open/read/release cycles to confirm
   memory stays flat.
-- `git init`.
 - Run `bend PROOF.bend --verdict` once Lean v4.34.0 is installed.
+
+Repository: git, first commit 2026-11-19; hosted privately on GitHub at
+OsamuDazai666/opencv-bend.
 
 ## Milestone 2: browser viewer (replaces highgui)
 
