@@ -16,11 +16,11 @@ LDFLAGS := $(FRAMEWORKS) -lpthread -lm -sectcreate __TEXT __info_plist Info.plis
 NATIVE_SRC := src/native/videoio.c src/native/videoio_darwin.h src/native/videoio.js \
   src/native/viewer.c src/native/viewer.js src/native/bytes.c src/native/bytes.js
 LIB_SRC := src/videoio.bend src/viewer.bend src/viewer_policy.bend src/layout.bend src/modes.bend \
-  src/image.bend src/jpeg.bend src/jpeg_tables.bend src/bytes.bend $(NATIVE_SRC)
+  src/image.bend src/imgproc.bend src/draw.bend src/jpeg.bend src/jpeg_tables.bend src/bytes.bend $(NATIVE_SRC)
 
-.PHONY: all camera stream modes process jpeg spike proof check clean bend-version
+.PHONY: all camera stream modes process jpeg imgproc bench bigjpeg drawcheck spike proof check clean bend-version
 
-all: camera stream modes process jpeg
+all: camera stream modes process jpeg imgproc
 
 camera: $(BUILD)/camera
 
@@ -31,6 +31,16 @@ modes: $(BUILD)/modes
 process: $(BUILD)/process
 
 jpeg: $(BUILD)/jpeg
+
+imgproc: $(BUILD)/imgproc
+
+# Camera-free benchmarks: make bench && ./build/bench 8k +RTS --threads 8
+bench: $(BUILD)/bench
+
+bigjpeg: $(BUILD)/bigjpeg
+
+# Drawing pixel checks (fast path vs distance field): make drawcheck && ./build/drawcheck
+drawcheck: $(BUILD)/drawcheck
 
 bend-version:
 	@got="$$($(BEND) version 2>&1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"; \
@@ -52,6 +62,27 @@ $(BUILD)/videoio_darwin.o: src/native/videoio_darwin.m src/native/videoio_darwin
 
 $(BUILD)/camera: $(BUILD)/camera.o $(BUILD)/videoio_darwin.o Info.plist
 	$(CC) $(BUILD)/camera.o $(BUILD)/videoio_darwin.o $(LDFLAGS) -o $@
+
+$(BUILD)/bench: examples/bench.bend $(LIB_SRC) | $(BUILD) bend-version
+	$(BEND) examples/bench.bend -o $(BUILD)/bench.c
+	$(CC) $(BEND_CFLAGS) $(BUILD)/bench.c -lpthread -lm -o $@
+
+$(BUILD)/bigjpeg: examples/bigjpeg.bend $(LIB_SRC) | $(BUILD) bend-version
+	$(BEND) examples/bigjpeg.bend -o $(BUILD)/bigjpeg.c
+	$(CC) $(BEND_CFLAGS) $(BUILD)/bigjpeg.c -lpthread -lm -o $@
+
+$(BUILD)/drawcheck: examples/drawcheck.bend $(LIB_SRC) | $(BUILD) bend-version
+	$(BEND) examples/drawcheck.bend -o $(BUILD)/drawcheck.c
+	$(CC) $(BEND_CFLAGS) $(BUILD)/drawcheck.c -lpthread -lm -o $@
+
+$(BUILD)/imgproc.c: examples/imgproc.bend $(LIB_SRC) | $(BUILD) bend-version
+	$(BEND) examples/imgproc.bend -o $@
+
+$(BUILD)/imgproc.o: $(BUILD)/imgproc.c src/native/videoio_darwin.h
+	$(CC) $(BEND_CFLAGS) -c $< -o $@
+
+$(BUILD)/imgproc: $(BUILD)/imgproc.o $(BUILD)/videoio_darwin.o Info.plist
+	$(CC) $(BUILD)/imgproc.o $(BUILD)/videoio_darwin.o $(LDFLAGS) -o $@
 
 $(BUILD)/jpeg.c: examples/jpeg.bend $(LIB_SRC) | $(BUILD) bend-version
 	$(BEND) examples/jpeg.bend -o $@

@@ -422,8 +422,8 @@ static void __attribute__((constructor)) viewer_leave_use(void) {
 Term view_publish_run(Env e, Term *f, IoWork *w) {
   uint64_t name_len = 0;
   char *name = io_cstr(e, f[0], &name_len);
-  uint32_t width = (uint32_t)f[1], height = (uint32_t)f[2];
-  Term bands = f[3];
+  uint32_t width = (uint32_t)f[1], height = (uint32_t)f[2], swap_rb = (uint32_t)f[3];
+  Term bands = f[4];
   uint32_t *pixels = io_mem(calloc((size_t)width * height + 1u, 4u));
   uint32_t row = 0;
   int code = io_nul(name, name_len) ? EINVAL : 0;
@@ -452,6 +452,13 @@ Term view_publish_run(Env e, Term *f, IoWork *w) {
   }
   if (code == 0 && row != height) {
     code = EINVAL;
+  }
+  if (code == 0 && swap_rb) {
+    // RGBA Mat -> BGRA pixel buffer, as Bend asked.
+    for (size_t i = 0; i < (size_t)width * height; i += 1u) {
+      uint32_t p = pixels[i];
+      pixels[i] = (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16);
+    }
   }
   if (code == 0) {
     code = bend_view_publish(name, width, height, pixels);
@@ -503,7 +510,7 @@ static void __attribute__((constructor)) viewer_views_use(void) {
 // The viewer claims a new frame (Viewer.peek), copies it into a Mat, encodes it
 // with the pure-Bend JPEG encoder and stores the bytes (Viewer.store_jpeg).
 
-Term video_bands_answer(Env e, uint32_t token, uint32_t rows_per_band);  // videoio.c
+Term video_bands_answer(Env e, uint32_t token, uint32_t rows_per_band, uint32_t swap_rb);  // videoio.c
 
 typedef struct {
   uint32_t capture, after, timeout_ms, sequence, frame;
@@ -565,7 +572,7 @@ static void __attribute__((constructor)) viewer_frame_size_use(void) {
 #ifdef CID(Viewer.frame_bands)
 
 Term viewer_frame_bands_run(Env e, Term *f, IoWork *w) {
-  return video_bands_answer(e, (uint32_t)f[0], (uint32_t)f[1]);
+  return video_bands_answer(e, (uint32_t)f[0], (uint32_t)f[1], (uint32_t)f[2]);
 }
 
 static void __attribute__((constructor)) viewer_frame_bands_use(void) {

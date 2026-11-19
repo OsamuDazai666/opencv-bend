@@ -7,6 +7,8 @@ import ./src/modes.bend as M
 import ./src/image.bend as I
 import ./src/jpeg.bend as J
 import ./src/jpeg_tables.bend as JT
+import ./src/imgproc.bend as IP
+import ./src/draw.bend as D
 
 # Proofs of LAWS.bend. Run `bend PROOF.bend` (and `--verdict`) before committing.
 
@@ -157,7 +159,10 @@ def Laws.modes_4k_webcam():
 def Laws.modes_from_numbers():
   {==}
 
-def Laws.image_pixel_channels():
+def Laws.image_rgba_layout():
+  {==}
+
+def Laws.image_camera_swap():
   {==}
 
 def Laws.image_luma_range():
@@ -197,4 +202,37 @@ def Laws.jpeg_byte_stuffing():
   {==}
 
 def Laws.jpeg_restart_interval():
+  {==}
+
+def Laws.imgproc_crop_refuses_past_edge():
+  {==}
+
+def Laws.imgproc_crop_maps_pixels():
+  {==}
+
+def Laws.imgproc_invert():
+  {==}
+
+def Laws.imgproc_threshold():
+  {==}
+
+def Laws.imgproc_flip_x():
+  {==}
+
+def Laws.imgproc_set_pixel():
+  {==}
+
+def Laws.imgproc_histogram():
+  {==}
+
+def Laws.imgproc_rectangle():
+  {==}
+
+def Laws.imgproc_downscale():
+  {==}
+
+def Laws.draw_bbox():
+  {==}
+
+def Laws.draw_outside_untouched():
   {==}

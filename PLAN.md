@@ -374,7 +374,152 @@ Costs and limits:
   triggered in testing (the writer holds 1 byte per pixel, and the worst
   case used 0.55).
 
-## Milestone 5: shrink the native code
+## Milestone 5: image processing (OpenCV imgproc)
+
+Working rules from the user (2026-11-19): copy OpenCV's behaviour by default;
+ask only crucial questions; the user states laws in plain English.
+
+User laws:
+- Every image is RGBA (not BGRA). Mats store R, G, B, A (red in the low
+  byte). The copy-in swaps red and blue because Bend asks it to
+  (`Mat.swap_from_camera`), and publishing swaps back.
+- Crop refuses a region past the edge; crop pixel (i, j) is the image's
+  (x + i, y + j).
+
+Choices made without asking (OpenCV behaviour): drawing clips at the edge;
+invert is bitwise_not on every channel, alpha included; threshold is
+THRESH_BINARY per channel (equal to the level -> 0); an empty crop is also
+refused.
+
+### Batch 1 (2026-11-19): done
+
+`src/imgproc.bend` (pure): `Mat.invert`, `Mat.fill`, `Mat.threshold`,
+`Mat.set` (refuses outside), `Mat.flip_x`, `Mat.crop`, `Mat.histogram`
+(256 luma bins), `Mat.rectangle` (outline or filled, clipped), and a
+per-pixel loop that passes a parameter record and (x, y), since templates
+cannot capture runtime values. `examples/imgproc.bend` (`make imgproc`)
+publishes views threshold, inverted, mirror, crop and boxes; `imgproc
+bench` times each operation.
+
+Measured (1280x720, 4 threads): invert 0.32 ms, threshold 0.62, flip_x
+0.32, rectangle 0.34-0.50, histogram 0.86, fill 0.08, crop 640x360 5.72
+(crop reads pixel by pixel through the band tree; a row copy would be
+faster).
+
+Verified: RGBA end to end (same centre pixel values; JPEG PSNR unchanged
+at 46.3/50.1/43.1 dB); all five views stream at ~30 FPS with correct sizes
+and colours.
+
+Laws: 9 new (camera swap, crop refusal, crop mapping, invert, threshold,
+flip, set pixel, histogram, rectangle) and one restated (the BGRA channel
+law became the RGBA layout law); 47 in all, gate about 17 s. Planted bugs: an off-by-one crop and swapped red/blue were caught
+at once. A crop that only checked the right edge passed at first, because
+the examples always overflowed both edges; the crop law now has
+right-only and bottom-only cases and catches both.
+
+### Batch 2: next
+
+Operations that read neighbouring rows across bands (they need halo rows
+from adjacent bands, or a read-only shared source): vertical flip, rotate
+90, resize (nearest, bilinear), box and Gaussian blur, Sobel (Canny later),
+lines and circles, colour conversion (RGB/BGR, HSV). Also a faster crop.
+
+## Performance goal (user, 2026-11-19): 8K operations within 16 ms
+
+"We are not moving onwards till we hit milliseconds on large images." The
+user chose the target: every operation within 16 ms (one 60 FPS frame) at
+8K (7680x4320, 33 Mpx).
+
+Hardware: Apple M1, 4 performance + 4 efficiency cores, 8 GB, no Metal
+compiler (Command Line Tools only, so no Bend GPU code without Xcode).
+Floor: an 8K RGBA image is 133 MB, and a read-and-write pass moves 266 MB,
+about 5 ms of memory traffic.
+
+`make bench && ./build/bench 720|4k|8k +RTS --threads 8` (camera-free).
+
+| Operation | 4K first | 4K now | 8K first | 8K now |
+|---|---|---|---|---|
+| create blank | 4.0 | 3.0 | 31.0 | 12.0 |
+| pattern fill (per-pixel x, y) | 3.0 | 1.8 | 12.0 | 7.7 |
+| invert | 1.7 | 1.5 | 6.7 | 5.7 |
+| threshold | 4.2 | 3.2 | 16.3 | 11.7 |
+| grey | 3.5 | 2.7 | 13.3 | 9.0 |
+| flip_x | 2.8 | 2.2 | 10.3 | 7.7 |
+| histogram | 5.3 | 3.8 | 21.0 | 13.7 |
+| crop 1/4 | 27.2 | 1.7 | 108.7 | 4.3 |
+| rectangle (large, filled) | 2.7 | 1.8 | 9.7 | 7.3 |
+| downscale to ~1920 wide | n/a | 4.3 | n/a | 10.3 |
+| viewer preview (downscale + JPEG) | n/a | 10.2 | n/a | 16.0 |
+| modern draw: 1 box 3000x2000 | 20.7 | 6.5 | 27.3 | 8.7 |
+| modern draw: 100 boxes | 18.0 | 3.7 | 93.3 | 12.3 |
+| JPEG encode, full size | 33.5 | 15.8 | 132.3 | 62.7 |
+
+(ms, 8 threads.) Every operation meets 16 ms at 8K except full-size JPEG
+encoding. Apple's ImageIO needs 16.4 ms at 4K and 64.1 ms at 8K on this
+machine, and the Bend encoder now matches it (15.8 and 62.7 ms), so 16 ms
+for an 8K JPEG is not reachable here on the CPU. The viewer therefore
+encodes a preview (4K and 8K shrunk to 1920x1080 by area average), which
+fits the budget.
+
+Changes, in order:
+- Bands scale with image size (8, 16, 32 or 64). Bend never moves a task,
+  and with 8 bands one landing on a slow core held up the rest.
+- Bands grow to fill their power-of-two arrays: at 8K, 128-row bands use
+  94% of each array, where 80-row bands used 59%. Blank creation went from
+  19 to 12 ms.
+- Crop is two parallel phases with indexed copies: 25-27x faster.
+- A per-pixel loop without coordinate arithmetic (threshold, fill).
+- Blank images build their band tree in parallel.
+- JPEG quantises each block once, finds its last non-zero coefficient, and
+  codes only up to it (profiled with `sample`: AC coding was 33% of the
+  time). Output is byte-identical to the previous encoder at 4K and 8K.
+- `Mat.downscale(mat, k)` (OpenCV INTER_AREA, k dividing 16) sums channels
+  in 16-bit lanes of two U32s (no allocation per pixel); the viewer uses it.
+
+Fixed while testing large images:
+- `Mat.mean_luma` overflowed above 16.8 Mpx (8K came out wrong); bands now
+  sum separately and combine as Nat.
+- A view stream never ended when the program finished (views have no
+  camera to close), so programs with an open view hung; streams now end
+  once no camera is open.
+
+Verified: 4K and 8K JPEGs decode with macOS's decoder against the exact
+pattern (27-36 dB, no corruption); 4K and 8K views arrive in the browser as
+1920x1080 previews matching an exact area average (21-32 dB, dominated by
+the hard-edged test pattern); camera, viewer and views still run at
+30 FPS; 50 laws pass (the gate now takes about 40 s).
+
+## Modern drawing (built 2026-11-19, `src/draw.bend`)
+
+OpenCV draws aliased, opaque shapes. Ours instead:
+- Anti-aliased edges from signed distance functions: each shape is a
+  distance field, and a pixel's coverage is clamp(0.5 - distance, 0, 1).
+- Shapes: rounded box (`Draw.box`, corner radius), circle, line with round
+  caps. One `Shape` record: kind, two points, radius, stroke width, fill and
+  stroke colours (RGBA, alpha used). Coordinates may be negative (two's
+  complement), and shapes clip at the image edge.
+- Style: translucent fill plus a crisp stroke centred on the edge,
+  composited "over" the image. Defaults: 2 px stroke, 8 px radius, 20% fill,
+  and a palette (`Draw.blue/green/red/amber/violet/cyan/white/slate`,
+  `Draw.alpha`).
+- `Mat.draw(image, shape)` and `Mat.draw_all(shapes, image)` (later shapes
+  on top). `draw_all` makes one parallel pass: each band draws every shape
+  that touches its rows, inside that shape's bounding box only.
+- Speed: integer tests sort each visited pixel first. Deep inside (past the
+  stroke and the soft edge), the fill is blended in exact integer
+  arithmetic; only the ring near the edge evaluates the distance field. At
+  8K: 8.7 ms for one 3000x2000 box, 12.3 ms for 100 boxes (were 27.3 and
+  93.3 ms with the distance field on every pixel).
+- Laws: `draw_bbox` (the box holds the shape plus its margin, clipped) and
+  `draw_outside_untouched`. The checker cannot evaluate F32, so coverage is
+  tested by running `drawcheck`: 10 exact pixel checks, plus every pixel of
+  a 1280x720 canvas under 10 shapes (strokes, translucency, tiny shapes,
+  off-edge) compared with the pure distance-field path: 0 differ. A planted
+  margin 2 px too thin makes 764 differ.
+- Not built yet: polyline, arrow, soft shadow, text labels (needs a
+  pure-Bend SDF font).
+
+## Milestone 6: shrink the native code
 
 - Test pattern and snapshot (PPM) writer move into Bend.
 - Review what remains native against rule 4 and move anything that decides

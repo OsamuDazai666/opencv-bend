@@ -22,7 +22,7 @@ io_eff(CID(Viewer.encodes), () => 0);
 io_eff(CID(Viewer.base_port), () => 8765);
 io_eff(CID(Viewer.stream_enter), () => ({ $: CID(False) }));
 io_eff(CID(Viewer.stream_leave), () => ({ $: CID(Unit) }));
-io_eff(CID(View.publish_native), (name, w, h, bands) => io_tup(bands, viewer_fail()));
+io_eff(CID(View.publish_native), (name, w, h, swap, bands) => io_tup(bands, viewer_fail()));
 io_eff(CID(Viewer.view_for), () => 0);
 io_eff(CID(Viewer.views), () => "");
 io_eff(CID(Viewer.peek), viewer_fail);

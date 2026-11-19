@@ -163,7 +163,7 @@ def Frame.description(frame: Frame) -> String & Frame:
         ", timestamp " ++ U32.show(timestamp_ms) ++ " ms",
         Frame{id, width, height, stride, sequence, timestamp_ms})
 
-def Frame.bands_native(+id: U32, +rows_per_band: U32) ->
+def Frame.bands_native(+id: U32, +rows_per_band: U32, +swap_rb: U32) ->
   IO(Result<&1, &1, U32 & String, List<(U32 & Array<U32>)>>):
   import "./native/videoio.c"
   import "./native/videoio.js"
@@ -176,13 +176,13 @@ def Frame.mat_of(+width: U32, +height: U32,
     case Done{pieces}:
       Done{I.Mat.from_bands(width, height, pieces)}
 
-# Copies the frame's pixels into a Mat (BGRA, bands of rows processed in
+# Copies the frame's pixels into a Mat (RGBA, bands of rows processed in
 # parallel). The frame is handed back; release it as usual.
 def Frame.to_mat(frame: Frame) -> IO(Frame & Result<&1, &1, U32 & String, I.Mat>):
   match frame:
     case Frame{+id, +width, +height, +stride, +sequence, +timestamp_ms}:
       IO.bind(Result<&1, &1, U32 & String, List<(U32 & Array<U32>)>>,
         Frame & Result<&1, &1, U32 & String, I.Mat>,
-        Frame.bands_native(id, I.Mat.rows_per_band(height)), copied =>
+        Frame.bands_native(id, I.Mat.rows_per_band(width, height), I.Mat.swap_from_camera()), copied =>
         IO.pure(Frame & Result<&1, &1, U32 & String, I.Mat>,
           (Frame{id, width, height, stride, sequence, timestamp_ms}, Frame.mat_of(width, height, copied))))

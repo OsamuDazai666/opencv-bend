@@ -210,36 +210,84 @@ def Enc.ac_end(state: Bits & U32, +chroma: Bool) -> Bits:
   (bits, +run) = state
   Enc.ac_end_if(U32.is_gt(run, 0), bits, chroma)
 
-# AC coefficients k..63 in zigzag order; got = (block, coefficient at k).
+# Quantised AC coefficients k..last in zigzag order; got = (block, value at k).
+# The caller writes EOB after `last` when it is not 63.
 def Enc.ac(n: Nat, got: Array<F32> & F32, state: Bits & U32, +k: U32, +chroma: Bool) ->
-  Array<F32> & Bits:
+  Array<F32> & (Bits & U32):
   match n:
     case 0n:
       (s, +c) = got
       (bits, +run) = state
-      (s, Enc.ac_end(Enc.ac_step(bits, run, Enc.quant(c, chroma, T.Jt.zigzag(U32.to_nat(k))), chroma), chroma))
+      (s, Enc.ac_step(bits, run, c, chroma))
     case 1n+p:
       (s, +c) = got
       (bits, +run) = state
       +next = (k + 1 : U32)
-      Enc.ac(p, Array.get(F32, s, T.Jt.zigzag(U32.to_nat(next))),
-        Enc.ac_step(bits, run, Enc.quant(c, chroma, T.Jt.zigzag(U32.to_nat(k))), chroma), next, chroma)
+      Enc.ac(p, Array.get(F32, s, T.Jt.zigzag(U32.to_nat(next))), Enc.ac_step(bits, run, c, chroma), next, chroma)
 
-def Enc.block_done(+dc: F32, coded: Array<F32> & Bits) -> Array<F32> & (Bits & F32):
-  (s, bits) = coded
-  (s, (bits, dc))
+# Quantises the block in place (natural order): s[z] = round(s[z] / divisor).
+def Enc.quantize(n: Nat, got: Array<F32> & F32, +z: U32, +chroma: Bool) -> Array<F32>:
+  match n:
+    case 0n:
+      (s, +c) = got
+      Array.set(F32, s, z, Enc.quant(c, chroma, z))
+    case 1n+p:
+      (s, +c) = got
+      Enc.quantize(p, Array.get(F32, Array.set(F32, s, z, Enc.quant(c, chroma, z)), (z + 1 : U32)), (z + 1 : U32), chroma)
 
-def Enc.block_dc(got: Array<F32> & F32, bits: Bits, +pred: F32, +chroma: Bool) ->
+# The zigzag index of the last non-zero AC coefficient (0 when all are zero),
+# scanning down from 63. `found` says the coefficient at k + 1 was non-zero.
+def Enc.last(n: Nat, found: Bool, got: Array<F32> & F32, +k: U32) -> Array<F32> & U32:
+  match n found:
+    case _ True{}:
+      (s, c) = got
+      (s, (k + 1 : U32))
+    case 0n False{}:
+      (s, c) = got
+      (s, 0)
+    case 1n+p False{}:
+      (s, +c) = got
+      Enc.last(p, Bool.not(F32.is_eq(c, 0.0)), Array.get(F32, s, T.Jt.zigzag(U32.to_nat((k - 1 : U32)))), (k - 1 : U32))
+
+# EOB after the last non-zero coefficient (not needed when it is the 63rd).
+def Enc.eob(state: Bits & U32, needed: Bool, +chroma: Bool) -> Bits:
+  (bits, run) = state
+  Enc.ac_end_if(needed, bits, chroma)
+
+def Enc.block_done(+dc: F32, coded: Array<F32> & (Bits & U32), +last: U32, +chroma: Bool) ->
   Array<F32> & (Bits & F32):
-  (s, +c) = got
-  +dc = Enc.quant(c, chroma, 0)
-  Enc.block_done(dc, Enc.ac(62n, Array.get(F32, s, T.Jt.zigzag(1n)),
-    (Enc.dc(bits, (dc - pred : F32), chroma), 0), 1, chroma))
+  (s, state) = coded
+  (s, (Enc.eob(state, U32.is_lt(last, 63), chroma), dc))
+
+def Enc.block_ac_if(none: Bool, got: Array<F32> & F32, bits: Bits, +dc: F32, +last: U32, +chroma: Bool) ->
+  Array<F32> & (Bits & F32):
+  match none:
+    case True{}:
+      (s, c) = got
+      (s, (Enc.put_huff(bits, Enc.ac_code(chroma, 0)), dc))
+    case False{}:
+      Enc.block_done(dc, Enc.ac(U32.to_nat((last - 1 : U32)), got, (bits, 0), 1, chroma), last, chroma)
+
+def Enc.block_ac(got: Array<F32> & F32, bits: Bits, +dc: F32, +last: U32, +chroma: Bool) -> Array<F32> & (Bits & F32):
+  Enc.block_ac_if(U32.is_eq(last, 0), got, bits, dc, last, chroma)
+
+def Enc.block_dc(got: Array<F32> & F32, bits: Bits, +pred: F32, +last: U32, +chroma: Bool) ->
+  Array<F32> & (Bits & F32):
+  (s, +dc) = got
+  Enc.block_ac(Array.get(F32, s, T.Jt.zigzag(1n)), Enc.dc(bits, (dc - pred : F32), chroma), dc, last, chroma)
+
+def Enc.block_scanned(scanned: Array<F32> & U32, bits: Bits, +pred: F32, +chroma: Bool) -> Array<F32> & (Bits & F32):
+  (s, +last) = scanned
+  Enc.block_dc(Array.get(F32, s, 0), bits, pred, last, chroma)
+
+def Enc.block_quantized(s: Array<F32>, bits: Bits, +pred: F32, +chroma: Bool) -> Array<F32> & (Bits & F32):
+  Enc.block_scanned(Enc.last(63n, False{}, Array.get(F32, s, T.Jt.zigzag(63n)), 63), bits, pred, chroma)
 
 # Quantises and entropy-codes one transformed 8x8 block; answers the new DC
-# predictor alongside the block and the writer.
+# predictor alongside the block and the writer. Coding stops at the last
+# non-zero coefficient (then EOB), so mostly-zero blocks are cheap.
 def Enc.block(s: Array<F32>, bits: Bits, +pred: F32, +chroma: Bool) -> Array<F32> & (Bits & F32):
-  Enc.block_dc(Array.get(F32, s, 0), bits, pred, chroma)
+  Enc.block_quantized(Enc.quantize(63n, Array.get(F32, s, 0), 0, chroma), bits, pred, chroma)
 
 # --- DCT (float AAN, as in libjpeg's jfdctflt) -------------------------------------
 
@@ -537,7 +585,7 @@ def Jpeg.segment(+marker: U32, +body: List<&2, U32>) -> List<&2, U32>:
 
 # Macroblocks per restart interval: one band's worth.
 def Jpeg.restart_interval(+w: U32, +h: U32) -> U32:
-  (Mb.count(w) * (I.Mat.rows_per_band(h) / 16) : U32)
+  (Mb.count(w) * (I.Mat.rows_per_band(w, h) / 16) : U32)
 
 # SOI, DQT, SOF0 (4:2:0), DHT, DRI (one restart interval per band), SOS.
 def Jpeg.header(+w: U32, +h: U32) -> List<&2, U32>:

@@ -10,7 +10,7 @@ import ../src/viewer.bend as W
 # brightness, the centre pixel, and a grey copy whose brightness must match.
 
 def Proc.show_px(+p: U32) -> String:
-  "B" ++ U32.show(I.Pixel.b(p)) ++ " G" ++ U32.show(I.Pixel.g(p)) ++ " R" ++ U32.show(I.Pixel.r(p))
+  "R" ++ U32.show(I.Pixel.r(p)) ++ " G" ++ U32.show(I.Pixel.g(p)) ++ " B" ++ U32.show(I.Pixel.b(p))
 
 def Proc.describe_done(+sequence: U32, +mean: U32, +w: U32, +h: U32, +centre: U32, gray: I.Mat & U32) -> String:
   (mat, +gray_mean) = gray

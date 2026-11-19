@@ -234,11 +234,12 @@ static void __attribute__((constructor)) video_modes_use(void) {
 #endif
 
 // Copies a frame's pixels into Bend arrays, one per band of `rows_per_band`
-// rows (Bend chooses the band size): a List of (rows, Array<U32>) pairs,
+// rows (Bend chooses the band size and, with swap_rb, asks for red and blue
+// to be swapped: BGRA frames become RGBA Mats): a List of (rows, Array<U32>) pairs,
 // top to bottom. Row padding is dropped; each array is a packed U32 block
 // (TAG_BUF) of the next power-of-two size, zero-filled past the pixels.
 // Not static: the viewer's encoder (viewer.c) uses it too.
-Term video_bands_answer(Env e, uint32_t token, uint32_t rows_per_band) {
+Term video_bands_answer(Env e, uint32_t token, uint32_t rows_per_band, uint32_t swap_rb) {
   const uint8_t *base = NULL;
   uint32_t width = 0, height = 0;
   size_t stride = 0;
@@ -262,7 +263,16 @@ Term video_bands_answer(Env e, uint32_t token, uint32_t rows_per_band) {
     u64 at = heap_alloc(e, blk_wcls(false, cls));
     uint32_t *dst = (uint32_t *)blk_ptr(e.mem, at, 0);
     for (uint32_t r = 0; r < rows; r += 1u) {
-      memcpy(dst + (size_t)r * width, base + (size_t)(y0 + r) * stride, (size_t)width * 4u);
+      const uint32_t *src = (const uint32_t *)(base + (size_t)(y0 + r) * stride);
+      uint32_t *out = dst + (size_t)r * width;
+      if (swap_rb) {
+        for (uint32_t x = 0; x < width; x += 1u) {
+          uint32_t p = src[x];
+          out[x] = (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16);
+        }
+      } else {
+        memcpy(out, src, (size_t)width * 4u);
+      }
     }
     memset(dst + count, 0, ((size_t)(1u << cls) - count) * 4u);
     list = io_node(e, CID(Con), io_tup(e, (Term)rows, term_blk(false, cls, at)), list);
@@ -274,7 +284,7 @@ Term video_bands_answer(Env e, uint32_t token, uint32_t rows_per_band) {
 #ifdef CID(Frame.bands_native)
 
 Term video_bands_run(Env e, Term *f, IoWork *w) {
-  return video_bands_answer(e, (uint32_t)f[0], (uint32_t)f[1]);
+  return video_bands_answer(e, (uint32_t)f[0], (uint32_t)f[1], (uint32_t)f[2]);
 }
 
 static void __attribute__((constructor)) video_bands_use(void) {

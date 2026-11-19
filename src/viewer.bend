@@ -2,6 +2,7 @@ import Base
 import ./viewer_policy.bend as P
 import ./image.bend as I
 import ./jpeg.bend as J
+import ./imgproc.bend as IP
 
 # The browser viewer: opencv-bend's replacement for imshow and highgui.
 #
@@ -85,7 +86,7 @@ def Viewer.views() -> IO(String):
   import "./native/viewer.c"
   import "./native/viewer.js"
 
-def View.publish_native(name: String, +width: U32, +height: U32, bands: List<(U32 & Array<U32>)>) ->
+def View.publish_native(name: String, +width: U32, +height: U32, +swap_rb: U32, bands: List<(U32 & Array<U32>)>) ->
   IO(List<(U32 & Array<U32>)> & Result<&1, &1, U32 & String, Unit>):
   import "./native/viewer.c"
   import "./native/viewer.js"
@@ -101,7 +102,7 @@ def Viewer.frame_size(+frame: U32) -> IO(Result<&1, &1, U32 & String, U32 & U32>
   import "./native/viewer.c"
   import "./native/viewer.js"
 
-def Viewer.frame_bands(+frame: U32, +rows_per_band: U32) ->
+def Viewer.frame_bands(+frame: U32, +rows_per_band: U32, +swap_rb: U32) ->
   IO(Result<&1, &1, U32 & String, List<(U32 & Array<U32>)>>):
   import "./native/viewer.c"
   import "./native/viewer.js"
@@ -279,7 +280,7 @@ def View.publish_valid(+name: String, +width: U32, +height: U32, bands: I.Bands<
     case True{}:
       IO.bind(List<(U32 & Array<U32>)> & Result<&1, &1, U32 & String, Unit>,
         I.Mat & Result<&1, &1, U32 & String, Unit>,
-        View.publish_native(name, width, height, I.Bands.pieces(Array<U32>, bands)), returned =>
+        View.publish_native(name, width, height, I.Mat.swap_from_camera(), I.Bands.pieces(Array<U32>, bands)), returned =>
         IO.pure(I.Mat & Result<&1, &1, U32 & String, Unit>, View.rebuilt(width, height, returned)))
 
 # Shows `image` in the browser viewer as the live view `name` (at
@@ -381,14 +382,28 @@ def Viewer.stream_sent(sent: Socket & Result<&1, &1, U32 & String, U32>,
   (sock, result) = sent
   Viewer.stream_sent_result(sock, result, next)
 
+# No new frame within 2 s. While a camera is open the stream waits on (a
+# paused camera, or a view not republished yet). Once no camera is open the
+# program is finishing, so the stream ends; otherwise a view stream, which
+# has no camera to close, would wait forever and keep the program alive.
+def Viewer.stream_waiting(sock: Socket, +after: U32, serving: Bool, next: Socket -> U32 -> IO(Unit)) -> IO(Unit):
+  match serving:
+    case True{}:
+      do IO<Unit>:
+        Viewer.log("no frame within 2 s; still waiting")
+        next(sock, after)
+    case False{}:
+      do IO<Unit>:
+        Viewer.log("stream ended: no camera is open any more")
+        Socket.close(sock)
+
 # A camera that pauses (timeout) keeps the stream open; anything else ends it.
 def Viewer.stream_failed(sock: Socket, +after: U32, timed_out: Bool,
   next: Socket -> U32 -> IO(Unit)) -> IO(Unit):
   match timed_out:
     case True{}:
-      do IO<Unit>:
-        Viewer.log("no frame within 2 s; still waiting")
-        next(sock, after)
+      IO.bind(U32, Unit, Viewer.capture_count(), count =>
+        Viewer.stream_waiting(sock, after, U32.is_gt(count, 0), next))
     case False{}:
       do IO<Unit>:
         Viewer.log("stream ended: the camera failed or closed")
@@ -434,6 +449,57 @@ def Viewer.store_encoded(sock: Socket, +capture: U32, +after: U32, +sequence: U3
   IO.bind(List<(Array<U32> & U32)> & Result<&1, &1, U32 & String, Unit>, Unit,
     Viewer.store_jpeg(capture, sequence, segs), stored => Viewer.stream_stored(sock, capture, after, stored, next))
 
+def Viewer.preview_k_by(full: Bool, half: Bool, quarter: Bool) -> U32:
+  match full half quarter:
+    case True{} _ _:
+      1
+    case False{} True{} _:
+      2
+    case False{} False{} True{}:
+      4
+    case False{} False{} False{}:
+      8
+
+# --- Preview size ----------------------------------------------------------------
+# Browsers cannot show 4K or 8K pixels anyway, and encoding them takes 16-64
+# ms. Frames larger than 1920x1080 are shrunk by 2, 4 or 8 (area average)
+# before encoding; the program's own images are never touched.
+
+def Viewer.preview_k(+w: U32, +h: U32) -> U32:
+  Viewer.preview_k_by(Bool.and(U32.is_le(w, 1920), U32.is_le(h, 1080)),
+    Bool.and(U32.is_le(w, 3840), U32.is_le(h, 2160)), Bool.and(U32.is_le(w, 7680), U32.is_le(h, 4320)))
+
+def Viewer.preview_or(original: I.Mat, small: Maybe<&1, I.Mat>) -> I.Mat:
+  match small:
+    case Some{s}:
+      s
+    case None{}:
+      original
+
+def Viewer.preview_pick(shrunk: I.Mat & Maybe<&1, I.Mat>) -> I.Mat:
+  (original, small) = shrunk
+  Viewer.preview_or(original, small)
+
+def Viewer.preview_if(keep: Bool, mat: I.Mat, +k: U32) -> I.Mat:
+  match keep:
+    case True{}:
+      mat
+    case False{}:
+      Viewer.preview_pick(IP.Mat.downscale(mat, k))
+
+def Viewer.preview_at(mat: I.Mat, size: U32 & U32) -> I.Mat:
+  (+w, +h) = size
+  +k = Viewer.preview_k(w, h)
+  Viewer.preview_if(U32.is_eq(k, 1), mat, k)
+
+def Viewer.preview_sized(sized: I.Mat & (U32 & U32)) -> I.Mat:
+  (mat, size) = sized
+  Viewer.preview_at(mat, size)
+
+# The image the viewer encodes: at most about 1920x1080.
+def Viewer.preview(mat: I.Mat) -> I.Mat:
+  Viewer.preview_sized(I.Mat.size(mat))
+
 def Viewer.stream_banded(sock: Socket, +capture: U32, +after: U32, +sequence: U32, +frame: U32, +w: U32, +h: U32,
   banded: Result<&1, &1, U32 & String, List<(U32 & Array<U32>)>>, next: Socket -> U32 -> IO(Unit)) -> IO(Unit):
   match banded:
@@ -444,7 +510,7 @@ def Viewer.stream_banded(sock: Socket, +capture: U32, +after: U32, +sequence: U3
     case Done{pieces}:
       do IO<Unit>:
         Viewer.frame_drop(frame)
-        Viewer.store_encoded(sock, capture, after, sequence, J.Jpeg.encode(I.Mat.from_bands(w, h, pieces)), next)
+        Viewer.store_encoded(sock, capture, after, sequence, J.Jpeg.encode(Viewer.preview(I.Mat.from_bands(w, h, pieces))), next)
 
 def Viewer.stream_sized(sock: Socket, +capture: U32, +after: U32, +sequence: U32, +frame: U32,
   sized: Result<&1, &1, U32 & String, U32 & U32>, next: Socket -> U32 -> IO(Unit)) -> IO(Unit):
@@ -455,7 +521,7 @@ def Viewer.stream_sized(sock: Socket, +capture: U32, +after: U32, +sequence: U32
         Viewer.stream_fallback(sock, capture, after, next)
     case Done{(+w, +h)}:
       IO.bind(Result<&1, &1, U32 & String, List<(U32 & Array<U32>)>>, Unit,
-        Viewer.frame_bands(frame, I.Mat.rows_per_band(h)), banded =>
+        Viewer.frame_bands(frame, I.Mat.rows_per_band(w, h), I.Mat.swap_from_camera()), banded =>
         Viewer.stream_banded(sock, capture, after, sequence, frame, w, h, banded, next))
 
 # The frame is cached already, or this viewer encodes it with the Bend encoder.

@@ -6,6 +6,8 @@ import ./src/modes.bend as M
 import ./src/image.bend as I
 import ./src/jpeg.bend as J
 import ./src/jpeg_tables.bend as JT
+import ./src/imgproc.bend as IP
+import ./src/draw.bend as D
 
 # Project laws. By Bend convention the human owns this file and the AI
 # proves it in PROOF.bend. These were PROPOSED by Claude while finishing
@@ -208,23 +210,31 @@ law modes_from_numbers:
 # --- Images (Mat) ---
 # A Mat is a full tree of 8 row bands, each an Array<U32> of BGRA pixels.
 
-# Packing and unpacking a BGRA pixel round-trips its channels.
-law image_pixel_channels:
-  {(I.Pixel.b(I.Pixel.pack(1, 2, 3, 4)), I.Pixel.g(I.Pixel.pack(1, 2, 3, 4)),
-    I.Pixel.r(I.Pixel.pack(1, 2, 3, 4)), I.Pixel.a(I.Pixel.pack(1, 2, 3, 4))) ==
-   (1, 2, 3, 4) : U32 & U32 & U32 & U32}
+# Every image is RGBA (user's law): a pixel packs red, green, blue, alpha, and
+# its bytes in memory read R, G, B, A (red in the low byte).
+law image_rgba_layout:
+  {(I.Pixel.r(I.Pixel.pack(1, 2, 3, 4)), I.Pixel.g(I.Pixel.pack(1, 2, 3, 4)),
+    I.Pixel.b(I.Pixel.pack(1, 2, 3, 4)), I.Pixel.a(I.Pixel.pack(1, 2, 3, 4)), I.Pixel.pack(1, 2, 3, 4)) ==
+   (1, 2, 3, 4, 67305985) : U32 & U32 & U32 & U32 & U32}
+
+# Camera frames arrive BGRA, so the copy-in is asked to swap red and blue.
+law image_camera_swap:
+  {I.Mat.swap_from_camera() == 1 : U32}
 
 # Black has luma 0, white 255, and a grey pixel keeps its level.
 law image_luma_range:
   {(I.Pixel.luma(I.Pixel.pack(0, 0, 0, 255)), I.Pixel.luma(I.Pixel.pack(255, 255, 255, 255)),
-    I.Pixel.luma(I.Pixel.gray(I.Pixel.pack(10, 200, 90, 255))), I.Pixel.luma(I.Pixel.pack(10, 200, 90, 255))) ==
+    I.Pixel.luma(I.Pixel.gray(I.Pixel.pack(90, 200, 10, 255))), I.Pixel.luma(I.Pixel.pack(90, 200, 10, 255))) ==
    (0, 255, 145, 145) : U32 & U32 & U32 & U32}
 
-# Bands hold ceil(height / 8) rows rounded up to a multiple of 16 (whole JPEG
-# macroblock rows); the last band may hold fewer.
+# Bands: a tree of 8 for camera-sized images, up to 64 for 4K and 8K. Each
+# band holds whole 16-row JPEG macroblock rows: the height over the band
+# count, grown to fill its power-of-two array (4K: 64 rows, 8K: 128 rows).
 law image_rows_per_band:
-  {(I.Mat.rows_per_band(720), I.Mat.rows_per_band(721), I.Mat.rows_per_band(480), I.Mat.rows_per_band(2)) ==
-   (96, 96, 64, 16) : U32 & U32 & U32 & U32}
+  {(I.Mat.rows_per_band(1280, 720), I.Mat.rows_per_band(640, 480), I.Mat.rows_per_band(2, 2),
+    I.Mat.rows_per_band(3840, 2160), I.Mat.rows_per_band(7680, 4320),
+    I.Mat.band_count(1280, 720), I.Mat.band_count(3840, 2160), I.Mat.band_count(7680, 4320)) ==
+   (96, 96, 16, 64, 128, 8, 64, 64) : U32 & U32 & U32 & U32 & U32 & U32 & U32 & U32}
 
 # Building the band tree keeps the bands in order (empty padding adds nothing).
 law image_bands_keep_order:
@@ -291,7 +301,105 @@ law jpeg_byte_stuffing:
   {(J.Bits.peek(J.Bits.byte(J.Bits.new(8), 255)), J.Bits.peek(J.Bits.byte(J.Bits.new(8), 254))) ==
    ((2, 255), (1, 254)) : (U32 & U32) & (U32 & U32)}
 
-# Each band is one restart interval: 80 x 6 macroblocks at 1280x720.
+# Each band is one restart interval: 80 x 6 macroblocks at 1280x720, 40 x 6
+# at 640x480 (96-row bands), one macroblock for a 16x16 image.
 law jpeg_restart_interval:
   {(J.Jpeg.restart_interval(1280, 720), J.Jpeg.restart_interval(640, 480), J.Jpeg.restart_interval(16, 16)) ==
-   (480, 160, 1) : U32 & U32 & U32}
+   (480, 240, 1) : U32 & U32 & U32}
+
+# --- Image processing, first batch (OpenCV behaviour unless stated) ---
+
+# Crop refuses a region that reaches past the edge (user's law), and an empty
+# one. Cases: past both edges, too wide, exactly fits, empty, past only the
+# right edge, past only the bottom edge.
+law imgproc_crop_refuses_past_edge:
+  {(IP.Mat.refused(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 1, 1, 2, 2))),
+    IP.Mat.refused(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 0, 0, 3, 1))),
+    IP.Mat.refused(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 0, 0, 2, 2))),
+    IP.Mat.refused(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 0, 0, 0, 1))),
+    IP.Mat.refused(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 1, 0, 2, 1))),
+    IP.Mat.refused(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 0, 1, 1, 2)))) ==
+   (True{}, True{}, False{}, True{}, True{}, True{}) : Bool & Bool & Bool & Bool & Bool & Bool}
+
+# Pixel (i, j) of a crop is pixel (x + i, y + j) of the image (user's law).
+law imgproc_crop_maps_pixels:
+  {(IP.Mat.crop_pixel(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(3, 3, [1, 2, 3, 4, 5, 6, 7, 8, 9]), 1, 1, 2, 2)), 0, 0),
+    IP.Mat.crop_pixel(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(3, 3, [1, 2, 3, 4, 5, 6, 7, 8, 9]), 1, 1, 2, 2)), 1, 0),
+    IP.Mat.crop_pixel(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(3, 3, [1, 2, 3, 4, 5, 6, 7, 8, 9]), 1, 1, 2, 2)), 0, 1),
+    IP.Mat.crop_pixel(IP.Mat.cropped(IP.Mat.crop(I.Mat.from_list(3, 3, [1, 2, 3, 4, 5, 6, 7, 8, 9]), 1, 1, 2, 2)), 1, 1)) ==
+   (5, 6, 8, 9) : U32 & U32 & U32 & U32}
+
+# Invert (OpenCV bitwise_not) turns every channel into 255 - value; twice is the original.
+law imgproc_invert:
+  {(I.Mat.pixel_at(IP.Mat.invert(I.Mat.from_list(1, 1, [I.Pixel.pack(0, 10, 255, 255)])), 0, 0),
+    I.Mat.pixel_at(IP.Mat.invert(IP.Mat.invert(I.Mat.from_list(1, 1, [123456789]))), 0, 0)) ==
+   (I.Pixel.pack(255, 245, 0, 0), 123456789) : U32 & U32}
+
+# Threshold (OpenCV THRESH_BINARY, per channel): above the level -> maxval;
+# exactly at the level -> 0.
+law imgproc_threshold:
+  {I.Mat.pixel_at(IP.Mat.threshold(I.Mat.from_list(1, 1, [I.Pixel.pack(100, 101, 99, 255)]), 100, 255), 0, 0) ==
+   I.Pixel.pack(0, 255, 0, 255) : U32}
+
+# Horizontal flip mirrors each row; flipping twice gives the original.
+law imgproc_flip_x:
+  {(I.Mat.pixel_at(IP.Mat.flip_x(I.Mat.from_list(3, 1, [1, 2, 3])), 0, 0),
+    I.Mat.pixel_at(IP.Mat.flip_x(I.Mat.from_list(3, 1, [1, 2, 3])), 1, 0),
+    I.Mat.pixel_at(IP.Mat.flip_x(I.Mat.from_list(3, 1, [1, 2, 3])), 2, 0),
+    I.Mat.pixel_at(IP.Mat.flip_x(IP.Mat.flip_x(I.Mat.from_list(3, 1, [1, 2, 3]))), 0, 0)) ==
+   (3, 2, 1, 1) : U32 & U32 & U32 & U32}
+
+# Setting a pixel changes only that pixel; a position outside is refused.
+law imgproc_set_pixel:
+  {(I.Mat.pixel_at(IP.Mat.image(IP.Mat.set(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 1, 0, 9)), 1, 0),
+    I.Mat.pixel_at(IP.Mat.image(IP.Mat.set(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 1, 0, 9)), 0, 0),
+    I.Mat.pixel_at(IP.Mat.image(IP.Mat.set(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 1, 0, 9)), 0, 1),
+    I.Mat.pixel_at(IP.Mat.image(IP.Mat.set(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 1, 0, 9)), 1, 1),
+    IP.Mat.ok(IP.Mat.set(I.Mat.from_list(2, 2, [1, 2, 3, 4]), 2, 0, 9))) ==
+   (9, 1, 3, 4, False{}) : U32 & U32 & U32 & U32 & Bool}
+
+# The brightness histogram counts every pixel once, in its luma bin.
+law imgproc_histogram:
+  {IP.Hist.summary(IP.Mat.counts(IP.Mat.histogram(I.Mat.from_list(2, 2,
+      [4278190080, 4278190080, 4294967295, I.Pixel.pack(100, 100, 100, 255)]))), 0, 255, 100) ==
+   (4, (2, (1, 1))) : U32 & U32 & U32 & U32}
+
+# Rectangles clip at the edge (OpenCV), never wrapping; outlines touch only the edge.
+law imgproc_rectangle:
+  {(I.Mat.pixel_at(IP.Mat.rectangle(I.Mat.from_list(4, 4, []), IP.Rect{2, 2, 9, 9, 7, 0}), 3, 3),
+    I.Mat.pixel_at(IP.Mat.rectangle(I.Mat.from_list(4, 4, []), IP.Rect{2, 2, 9, 9, 7, 0}), 1, 1),
+    I.Mat.pixel_at(IP.Mat.rectangle(I.Mat.from_list(4, 4, []), IP.Rect{2, 2, 9, 9, 7, 0}), 0, 3),
+    I.Mat.pixel_at(IP.Mat.rectangle(I.Mat.from_list(4, 4, []), IP.Rect{0, 0, 3, 3, 7, 1}), 0, 2),
+    I.Mat.pixel_at(IP.Mat.rectangle(I.Mat.from_list(4, 4, []), IP.Rect{0, 0, 3, 3, 7, 1}), 1, 1)) ==
+   (7, 0, 0, 7, 0) : U32 & U32 & U32 & U32 & U32}
+
+# Downscale (OpenCV INTER_AREA by an integer factor): each output pixel is the
+# rounded average of a k x k block; a 2x2 black/white checkerboard becomes one
+# mid-grey pixel. Factors that do not divide 16 are refused.
+law imgproc_downscale:
+  {(IP.Mat.crop_pixel(IP.Mat.cropped(IP.Mat.downscale(I.Mat.from_list(2, 2,
+      [4278190080, 4294967295, 4294967295, 4278190080]), 2)), 0, 0),
+    IP.Mat.refused(IP.Mat.cropped(IP.Mat.downscale(I.Mat.from_list(4, 4, []), 3)))) ==
+   (I.Pixel.pack(128, 128, 128, 255), True{}) : U32 & Bool}
+
+# --- Modern drawing (anti-aliased, translucent; only the shape's box is visited) ---
+# Coverage and blending use floats, which the checker cannot evaluate; they
+# are checked by running (examples/drawcheck.bend). These laws cover the
+# integer part: which pixels a shape may touch.
+
+# The box a shape may touch: its geometry plus half the stroke and 2 pixels
+# for the soft edge, clipped to the image (also when it starts off the left).
+law draw_bbox:
+  {(D.Draw.bbox(D.Draw.box(10, 10, 20, 20, D.Draw.blue()), 100, 100),
+    D.Draw.bbox(D.Draw.circle(50, 50, 10, D.Draw.blue()), 100, 100),
+    D.Draw.bbox(D.Shape{0, (0 - 10 : U32), 5, 15, 10, 0, 0, D.Draw.blue(), 0}, 20, 20)) ==
+   (D.Box{7, 7, 34, 34}, D.Box{37, 37, 64, 64}, D.Box{0, 3, 8, 18}) : D.Box & D.Box & D.Box}
+
+# Drawing never changes a pixel outside that box, and a shape starting off
+# the left edge does not wrap around to the right.
+law draw_outside_untouched:
+  {(I.Mat.pixel_at(D.Mat.draw(I.Mat.blank(12, 12, 4278190080), D.Draw.box(2, 2, 4, 4, D.Draw.red())), 11, 11),
+    I.Mat.pixel_at(D.Mat.draw(I.Mat.blank(12, 12, 4278190080), D.Draw.box(2, 2, 4, 4, D.Draw.red())), 10, 0),
+    I.Mat.pixel_at(D.Mat.draw(I.Mat.blank(20, 20, 4278190080),
+      D.Shape{0, (0 - 10 : U32), 5, 15, 10, 0, 0, D.Draw.blue(), 0}), 19, 8)) ==
+   (4278190080, 4278190080, 4278190080) : U32 & U32 & U32}
